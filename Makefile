@@ -1,8 +1,8 @@
 
-CC= gpp
+CC= g++
 RM= rm -vf
 CFLAGS= -Wall -g 
-CPPFLAGS= -I.
+CPPFLAGS= -std=c++11 -I.
 SRCFILES= oss.cpp user_proc.cpp 
 OBJFILES= $(patsubst %.cpp, %.o, $(SRCFILES))
 PROGFILES= $(patsubst %.cpp, %, $(SRCFILES))
