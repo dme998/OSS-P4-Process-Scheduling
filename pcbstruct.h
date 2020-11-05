@@ -6,7 +6,10 @@ typedef struct ProcessControlBlock {
   int process_priority;
 }pcb_t; 
 
-const int MAX_PCBS = 18; 
-const int SHM_SIZE = ( sizeof(pcb_t) * MAX_PCBS ); 
-const char *LOGFILE = "log.txt";
+struct myclock_t {
+  int seconds = 0;
+  long nanoseconds = 0;
+};
 
+const int MAX_PCBS = 18;
+const int SHM_SIZE = (sizeof(pcb_t) * MAX_PCBS); 

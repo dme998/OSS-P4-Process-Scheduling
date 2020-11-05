@@ -26,25 +26,34 @@ using namespace std;
 int main() {
   
   cout << "user: hello world" << endl;
-
+  
   //shared memory var
-  key_t shmkey; 
-  int shmid;
-  pcb_t *pctable;  //array of structs, process table containing each PCB (shared)
+  key_t shmkey, shmkey2;     //PCT, clock
+  int shmid, shmid2;         //PCT, clock
+  pcb_t *pctable;            //array of structs, process table containing each PCB (shared)
+  myclock_t *clocksim;       //hold 2 values: seconds, nanoseconds (shared)
+  shmkey = 99841;            //PCT
+  shmkey2 = 99842;           //clock
 
   //check for existing shared memory (does not create)
-  shmkey = 9984;
   shmid = shmget(shmkey, SHM_SIZE, 0);
-  if (shmid == IPC_ERR) { perror("user shmget"); exit(1); }
+  if (shmid == IPC_ERR) { perror("user shmget PCT"); exit(1); }
+  shmid2 = shmget(shmkey2, sizeof(int)*2, 0);
+  if (shmid2 == IPC_ERR) { perror("user shmget clock"); exit(1); }
    
   //attach to existing shared memory 
   pctable = (pcb_t *)shmat(shmid, NULL, 0);
-  if (pctable == (void *)IPC_ERR) { perror("user shmat"); exit(1); }
+  if (pctable == (void *)IPC_ERR) { perror("user shmat PCT"); exit(1); }
+  clocksim = (myclock_t *)shmat(shmid2, NULL, 0);
+  if (clocksim == (void *)IPC_ERR) { perror("user shmat clock"); exit(1); }
  
-  cout << "user: read from PCB, mypid is " << pctable[0].local_simulated_pid << endl;
+  //cout << "user: read from PCB, mypid is " << pctable[0].local_simulated_pid << endl;
+  //cout << "user: read from clock (sec): " << clocksim->seconds << endl;
+  //cout << "user: read from clock (ns):  " << clocksim->nanoseconds << endl;
 
   //detach from existing shared memory
-  if (shmdt((void *)pctable) == IPC_ERR) { perror("user shmdt"); }
+  if (shmdt((void *)pctable) == IPC_ERR) { perror("user shmdt PCT"); }
+  if (shmdt((void *)clocksim) == IPC_ERR) { perror("user shmdt clokc"); }
 
   return 0;
 }

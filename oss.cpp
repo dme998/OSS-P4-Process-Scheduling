@@ -25,54 +25,124 @@
 using namespace std;
 
 /* GLOBALS */
-int logcount;                //counter for number of lines written to log
-bitset<MAX_PCBS> pctracker;  //process control tracker (bitvector)
+static int logcount;                    //counter for number of lines written to log
+static bitset<MAX_PCBS> pctracker;      //process control tracker (bitvector)
+static const int SECTONS = 1000000000;  //conversion: no. of nanoseconds in a second
+const char *LOGFILE = "log.txt";        //specify name of logfile
 
 /* PROTOTYPES */
 void writeLog(const string &message, bool append); 
 int fexe();
+void terminateSelf();
 void cleanSHM();
 void cleanMSQ();
 void cleanAll();
+myclock_t getRandomInterval(const int max_sec, const long max_ns); 
+myclock_t addTimeToClock(myclock_t timeval, myclock_t current);
 
 int main() {
-  
+  srand(time(NULL));
   writeLog("oss: initialized", false); //init logfile (clear it out)
 
   //shared memory var
-  key_t shmkey;
-  int shmid;
-  pcb_t *pctable;  //array of structs, process table containing each PCB
-  
-  //allocate shared memory
-  shmkey = 9984; //hardcoded key because ftok always returns 0 for some reason
+  key_t shmkey, shmkey2;        //keys used in shmget
+  int shmid, shmid2;            //ids returned by shmget
+  pcb_t *pctable;               //array of structs, process table containing each PCB 
+  myclock_t *clocksim;          //holds two values: sec and nanosec (shared)
+  shmkey = 99841;               //hardcoded key because ftok always returns 0 
+  shmkey2 = 99842;
 
+  //allocate shared memory - PCT
   shmid = shmget(shmkey, SHM_SIZE, PERM | IPC_CREAT | IPC_EXCL);
-  if (shmid == IPC_ERR) { perror("shmget"); exit(1); }
-  else writeLog("oss: allocated shared memory", true); 
+  if (shmid == IPC_ERR) { perror("shmget PCT"); exit(1); }
+  else writeLog("oss: allocated shared memory for process control table", true); 
   pctable = (pcb_t *)shmat(shmid, NULL, 0);
-  if (pctable == (void *)IPC_ERR) { perror("shmat"); exit(1); }
-  else writeLog("oss: attached to shared memory", true);
+  if (pctable == (void *)IPC_ERR) { perror("shmat PCT"); exit(1); }
+  else writeLog("oss: attached to shared memory for process control table", true);
+
+  //allocate shared memory - clock
+  shmid2 = shmget(shmkey2, sizeof(myclock_t), PERM | IPC_CREAT | IPC_EXCL);
+  if (shmid2 == IPC_ERR) { perror("shmget clock"); exit(1); }
+  else writeLog("oss: allocated shared memory for simulated clock", true);
+  clocksim = (myclock_t *)shmat(shmid2, NULL, 0);
+  if (clocksim == (void *)IPC_ERR) { perror("shmat clock"); exit(1); }
+  else writeLog("oss: attached to shared memory for simulated clock", true);
   
-  //lets just put something in the pctable
+  /*************************************************************************/
+
+  
+  //processing loop (scheduling, etc.)
+  const int maxIntervalSC = 2;                  //max interval to generate new proc
+  const int maxIntervalNS = SECTONS / 2;        //max interval to generate new proc
+  const int maxProcessesToGenerate = 10;        //should be 100 according to Project outline
+  int totalProcessesGenerated = 0;              //running total of fork-exec'd processes 
+  myclock_t interval;                           //interval between processes (random) 
+    interval.seconds = 0;
+    interval.nanoseconds = 0;
+  myclock_t localClocksim;                      //clocksim local to program, not yet in shm
+    localClocksim.seconds = 0;
+    localClocksim.nanoseconds = 0;
+  writeLog("oss: initialized process loop variables", true);
+  
+  if (totalProcessesGenerated > maxProcessesToGenerate) {
+    writeLog("oss: error: running process total is initialized higher than max",true);
+    terminateSelf();
+  }
+  
+  //launching the first processes...
+  interval = getRandomInterval(maxIntervalSC, maxIntervalNS);
+  localClocksim = addTimeToClock(interval, localClocksim);
+
+  //lets just put something in the pctable to test
   pid_t mypid = fexe();
-  writeLog( ("oss: fork and exec process with PID " + to_string(mypid)), true );
+  writeLog("oss: Generated process with PID " + to_string(mypid) + " at time " 
+           + to_string(clocksim->seconds) + ":" + to_string(clocksim->nanoseconds), true);
   pctable[0].local_simulated_pid = mypid;
   pctracker.set(0);
+  
+  int pcbnum = 0;  //pctable[] index
+  while(totalProcessesGenerated < maxProcessesToGenerate) {
+    //generate processes at random intervals
+    interval = getRandomInterval(maxIntervalSC, maxIntervalNS);
+        
+    if (pctracker.count() < MAX_PCBS) {
+      int i = 0;
+      while(!pctracker.test(i)){ i++; }  //find first available PCB using pctracker bitvector
+      pcbnum = i;
+      pctracker.set(i);
+      pid_t mypid = fexe();
+      totalProcessesGenerated++;
+      localClocksim = addTimeToClock(interval, localClocksim);
+      clocksim->seconds = localClocksim.seconds;
+      clocksim->nanoseconds = localClocksim.nanoseconds;
+      writeLog("oss: Generated process with PID " + to_string(mypid) + " at time " 
+                + to_string(clocksim->seconds) + ":" + to_string(clocksim->nanoseconds), true);
+      pctable[pcbnum].local_simulated_pid = mypid;  //TODO user process will need non-0 index
+                                                    //.....pass pcbnum via execl
+    }
+    
+  }
+
+
+  /*************************************************************************/
 
   //detach shared memory
-  if (shmdt((void *)pctable) == IPC_ERR) { perror("shmdt"); }
-  writeLog("oss: detached from shared memory", true);
-  
+  if (shmdt((void *)pctable) == IPC_ERR) { perror("shmdt PCT"); }
+  writeLog("oss: detached from shared memory for process control table", true);
+  if (shmdt((void *)clocksim) == IPC_ERR) { perror("shmdt clock"); }
+  writeLog("oss: detached from shared memory for simulated clock", true);
+
   //free shared memory, wait for children
   pid_t wpid;
   int status = 0;
   while( (wpid = wait(&status)) > 0 );
   cout << "oss: no more children." << endl;
 
-  if (shmctl(shmid, IPC_RMID, NULL) == IPC_ERR) { perror("perror: shmctl"); }
-  writeLog("oss: freed shared memory", true);
-  
+  if (shmctl(shmid, IPC_RMID, NULL) == IPC_ERR) { perror("shmctl PCT"); }
+  writeLog("oss: freed shared memory for process control table", true);
+  if (shmctl(shmid2, IPC_RMID, NULL) == IPC_ERR) { perror("shmctl clock"); }
+  writeLog("oss: freed shared memory for simulated clock", true);
+
 
   //terminate
   writeLog("oss: terminating", true);
@@ -81,8 +151,9 @@ int main() {
 
 
 
-
-/* FUNCTIONS */
+/****************************************************/
+/*                   FUNCTIONS                      */
+/****************************************************/
 void writeLog(const string &message, bool append) {
   if (logcount >= 1000) {
    write(STDOUT_FILENO, "error: cannot write to log: file is too big.\n", 45);
@@ -100,6 +171,7 @@ void writeLog(const string &message, bool append) {
   f << message << std::endl;
   f.close();
 }
+
 
 int fexe() {  
   pid_t mypid = fork();
@@ -123,3 +195,59 @@ int fexe() {
 }
 
 
+myclock_t getRandomInterval(const int max_sec, const long max_ns) { 
+  myclock_t newInterval;
+  
+  if (max_sec > 0) newInterval.seconds = rand() % (max_sec + 1);
+  else newInterval.seconds = 0;
+  
+  if (max_ns > 0) newInterval.nanoseconds = rand() % (max_ns + 1);
+  else newInterval.nanoseconds = 0;
+  
+  //convert nanoseconds to seconds
+  while(newInterval.nanoseconds >= SECTONS) {
+    newInterval.nanoseconds -= SECTONS;
+    newInterval.seconds++;
+  }
+  
+  //sanity check
+  if(newInterval.nanoseconds < 0 || newInterval.seconds < 0) {
+    writeLog("oss: error: getRandomInterval() is returning negative", true);
+    exit(1);
+  }
+  return newInterval;
+}
+
+
+myclock_t addTimeToClock(myclock_t timeval, myclock_t current) {
+  int tempSEC = timeval.seconds + current.seconds;
+  long tempNS = timeval.nanoseconds + current.nanoseconds;
+  myclock_t updatedClock;
+
+  //convert nanoseconds to seconds
+  while(tempNS >= SECTONS) {
+    tempNS -= SECTONS;
+    tempSEC++;
+  }
+
+  //sanity check
+  if(tempSEC < 0 || tempNS < 0) {
+    writeLog("oss: error: addTimeToClock() is getting a negative result", true);
+    exit(1);
+  }
+  else {
+    updatedClock.seconds = tempSEC;
+    updatedClock.nanoseconds = tempNS;
+  }
+  return updatedClock;
+}
+
+
+void terminateSelf() {
+  //TODO cleanup function
+    //set variables to track allocated/attached memory/msgq
+    //depending on which flags are set, you can free them here
+    //pass the shmid, etc as arguments or null if n/a
+  cout << "early termination.  Check shared memory and user processes." << endl;
+  exit(1);
+}

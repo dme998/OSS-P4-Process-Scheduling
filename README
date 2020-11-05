@@ -4,3 +4,7 @@
  * Date: November 5, 2020 
  */
 
+oss will allocate two sections of shared memory to which user_proc will attach.
+oss "schedules" and runs 10 user process back to back using a simulated clock.
+user_proc simply prints "hello world".
+
