@@ -30,18 +30,24 @@ static int logcount;                    //counter for number of lines written to
 static bitset<MAX_PCBS> pctracker;      //process control tracker (bitvector)
 static const int SECTONS = 1000000000;  //conversion: no. of nanoseconds in a second
 const char *LOGFILE = "log.txt";        //specify name of logfile
+volatile sig_atomic_t gSTOP = 0;        //signal handling: to declare program should stop running
+volatile sig_atomic_t gSHM = 0;         //signal handling: flag that shared memory exists (pct)
+volatile sig_atomic_t gSHM2 = 0;        //signal handling: flag that shared memory exists (clock)
+volatile sig_atomic_t gMSQ = 0;         //signal handling: flag that message queue exists
 
 /* PROTOTYPES */
 void writeLog(const string &message, bool append); 
 int fexe();
-void terminateSelf();
-void cleanSHM();
-void cleanMSQ();
-void cleanAll();
+void terminateSelf(int _shmid, int shmid2, int _msqid);
+void interruptHandler(int sig);
+//void cleanSHM();
+//void cleanMSQ();
+//void cleanAll();
 myclock_t getRandomInterval(const int max_sec, const long max_ns); 
 myclock_t addTimeToClock(myclock_t timeval, myclock_t current);
 
 int main() {
+  signal(SIGINT, interruptHandler);
   srand(time(NULL));
   writeLog("oss: initialized", false); //init logfile (clear it out)
 
@@ -55,27 +61,35 @@ int main() {
   int msqid;                    //id returned by msgget
   key_t msqkey = 99843;         //message queue key
   mymsg_t mymsg;                //holds message type and message data
+  
+  if(gSTOP == 1) {exit(1);}
 
   //allocate shared memory - PCT
   shmid = shmget(shmkey, SHM_SIZE, PERM | IPC_CREAT | IPC_EXCL);
   if (shmid == IPC_ERR) { perror("shmget PCT"); exit(1); }
-  else writeLog("oss: allocated shared memory for process control table", true); 
+  else { gSHM = 1; writeLog("oss: allocated shared memory for process control table", true); }
   pctable = (pcb_t *)shmat(shmid, NULL, 0);
-  if (pctable == (void *)IPC_ERR) { perror("shmat PCT"); exit(1); }
-  else writeLog("oss: attached to shared memory for process control table", true);
+  if (pctable == (void *)IPC_ERR) { perror("shmat PCT"); terminateSelf(shmid, -1, -1); }
+  else { writeLog("oss: attached to shared memory for process control table", true); }
+
+  if(gSTOP == 1) {terminateSelf(shmid, -1, -1);}
 
   //allocate shared memory - clock
   shmid2 = shmget(shmkey2, sizeof(myclock_t), PERM | IPC_CREAT | IPC_EXCL);
-  if (shmid2 == IPC_ERR) { perror("shmget clock"); exit(1); }
-  else writeLog("oss: allocated shared memory for simulated clock", true);
+  if (shmid2 == IPC_ERR) { perror("shmget clock"); terminateSelf(shmid, -1, -1); }
+  else { gSHM2 = 1; writeLog("oss: allocated shared memory for simulated clock", true); }
   clocksim = (myclock_t *)shmat(shmid2, NULL, 0);
-  if (clocksim == (void *)IPC_ERR) { perror("shmat clock"); exit(1); }
-  else writeLog("oss: attached to shared memory for simulated clock", true);
+  if (clocksim == (void *)IPC_ERR) { perror("shmat clock"); terminateSelf(shmid, shmid2, -1); }
+  else { writeLog("oss: attached to shared memory for simulated clock", true); }
   
+  if(gSTOP == 1) { terminateSelf(shmid, shmid2, -1); }
+
   //setup the message queue
   msqid = msgget(msqkey, PERM | IPC_CREAT | IPC_EXCL);
-  if (msqid == IPC_ERR) { perror("msgget"); exit(1); }
-  else writeLog("oss: created message queue", true);
+  if (msqid == IPC_ERR) { perror("msgget"); terminateSelf(shmid, shmid2, -1); }
+  else { gMSQ = 1; writeLog("oss: created message queue", true); }
+
+  if(gSTOP == 1) {terminateSelf(shmid, shmid2, msqid);}
 
   /*************************************************************************/
 
@@ -91,38 +105,45 @@ int main() {
   myclock_t localClocksim;                      //clocksim local to program, not yet in shm
     localClocksim.seconds = 0;
     localClocksim.nanoseconds = 0;
+  int pcbnum = 0;                               //pctable[] index
   writeLog("oss: initialized process loop variables", true);
   
   if (totalProcessesGenerated > maxProcessesToGenerate) {
     writeLog("oss: error: running process total is initialized higher than max",true);
-    terminateSelf();
+    terminateSelf(shmid, shmid2, msqid);
   }
   
   //launching the first processes...
   interval = getRandomInterval(maxIntervalSC, maxIntervalNS);
   localClocksim = addTimeToClock(interval, localClocksim);
+  
+  if(gSTOP == 1) {terminateSelf(shmid, shmid2, msqid);}
 
   //lets just put something in the pctable to test
   pid_t childpid = fexe();
   writeLog("oss: Generated process with PID " + to_string(childpid) + " at time " 
            + to_string(clocksim->seconds) + ":" + to_string(clocksim->nanoseconds), true);
-  pctable[0].local_simulated_pid = childpid;
-  pctracker.set(0);
+  pctable[pcbnum].local_simulated_pid = childpid;
+  pctracker.set(pcbnum);
   
   mymsg.mtype = childpid; 
-  strcpy( mymsg.mtext, "TEST");
-  if ( msgsnd(msqid, &mymsg, strlen(mymsg.mtext) + 1, IPC_NOWAIT) == IPC_ERR ) {
+  mymsg.mpcb = pcbnum;
+  if ( msgsnd(msqid, &mymsg, sizeof(mymsg.mpcb), IPC_NOWAIT) == IPC_ERR ) {
     perror("msgsnd");
-    exit(1);
+    terminateSelf(shmid, shmid2, msqid);
   }
   writeLog("oss: sent exclusive test message to first user process", true);
-
-  int pcbnum = 0;  //pctable[] index
+  
   while(totalProcessesGenerated < maxProcessesToGenerate) {
+    
+    if(gSTOP == 1) {terminateSelf(shmid, shmid2, msqid);}
+    
     //generate processes at random intervals
     interval = getRandomInterval(maxIntervalSC, maxIntervalNS);
         
     if (pctracker.count() < MAX_PCBS) {
+      if(gSTOP == 1) {terminateSelf(shmid, shmid2, msqid);}
+      
       int i = 0;
       while(!pctracker.test(i)){ i++; }  //find first available PCB using pctracker bitvector
       pcbnum = i;
@@ -135,10 +156,18 @@ int main() {
       writeLog("oss: Generated process with PID " + to_string(childpid) + " at time " 
                 + to_string(clocksim->seconds) + ":" + to_string(clocksim->nanoseconds), true);
       pctable[pcbnum].local_simulated_pid = childpid; 
+      mymsg.mtype = childpid;
+      mymsg.mpcb = pcbnum;
+      if ( msgsnd(msqid, &mymsg, sizeof(mymsg.mpcb), IPC_NOWAIT) == IPC_ERR ) {
+        perror("msgsnd");
+        terminateSelf(shmid, shmid2, msqid);
+      }
+      writeLog("oss: sent exclusive message to user" + to_string(childpid), true);
     }
     
   }
-
+  
+  if(gSTOP == 1) {terminateSelf(shmid, shmid2, msqid);}
 
   /*************************************************************************/
 
@@ -173,6 +202,11 @@ int main() {
 /****************************************************/
 /*                   FUNCTIONS                      */
 /****************************************************/
+void interruptHandler(int sig) { 
+  write(STDOUT_FILENO, " oss: signal received\n", 22);
+  gSTOP = 1; 
+}
+
 void writeLog(const string &message, bool append) {
   if (logcount >= 1000) {
    write(STDOUT_FILENO, "error: cannot write to log: file is too big.\n", 45);
@@ -199,7 +233,7 @@ int fexe() {
   }
   else if (childpid >= 0) {
     //fork successful
-    //TODO increment pr_count
+    //TODO
   }
   if (childpid == 0) {
     //I am child process
@@ -207,7 +241,7 @@ int fexe() {
     
     if ( execv(args[0], args) == -1) {
       perror("execv failed");
-      exit(1);
+      gSTOP = 1;
     }
   }
   return childpid;
@@ -232,7 +266,7 @@ myclock_t getRandomInterval(const int max_sec, const long max_ns) {
   //sanity check
   if(newInterval.nanoseconds < 0 || newInterval.seconds < 0) {
     writeLog("oss: error: getRandomInterval() is returning negative", true);
-    exit(1);
+    interruptHandler(SIGINT);
   }
   return newInterval;
 }
@@ -252,7 +286,7 @@ myclock_t addTimeToClock(myclock_t timeval, myclock_t current) {
   //sanity check
   if(tempSEC < 0 || tempNS < 0) {
     writeLog("oss: error: addTimeToClock() is getting a negative result", true);
-    exit(1);
+    interruptHandler(SIGINT);
   }
   else {
     updatedClock.seconds = tempSEC;
@@ -262,11 +296,26 @@ myclock_t addTimeToClock(myclock_t timeval, myclock_t current) {
 }
 
 
-void terminateSelf() {
-  //TODO cleanup function
-    //set variables to track allocated/attached memory/msgq
-    //depending on which flags are set, you can free them here
-    //pass the shmid, etc as arguments or null if n/a
+void terminateSelf(int _shmid, int _shmid2, int _msqid) {
+  if (gSHM == 1) {
+    //free shm pctable
+    if (shmctl(_shmid, IPC_RMID, NULL) == IPC_ERR) { perror("shmctl PCT"); }
+    else writeLog("oss: freed shared memory for process control table", true);
+  }
+
+  if (gSHM2 == 1) {
+    //free shm clock
+    if (shmctl(_shmid2, IPC_RMID, NULL) == IPC_ERR) { perror("shmctl clock"); }
+    else writeLog("oss: freed shared memory for simulated clock", true);
+  }
+
+  if (gMSQ == 1) {
+    //free message queue
+    if ( msgctl(_msqid, IPC_RMID, NULL) == IPC_ERR ) { perror("msgctl RMID"); }
+    else writeLog("oss: removed message queue", true);
+  }
+
+
   cout << "early termination.  Check shared memory and user processes." << endl;
   exit(1);
 }

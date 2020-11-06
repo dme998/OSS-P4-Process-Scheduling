@@ -57,7 +57,8 @@ int main() {
   
   //wait on first message from oss
   int msgrcvTimeout = 3;  //timeout (seconds) to abort if no message is received
-  while(msgrcvTimeout > 0) {
+  bool loopAgain = true;  //while loop control
+  while(msgrcvTimeout > 0 && loopAgain) {
     if (msgrcv(msqid, &mymsg, MSG_SIZE, mypid, IPC_NOWAIT) == IPC_ERR) { 
       if (errno != ENOMSG) { 
         perror("user msgrcv"); exit(1);
@@ -68,10 +69,11 @@ int main() {
       }
     }
     else {
-      cout << "user " << mypid << " received message: " << mymsg.mtext << endl;
+      cout << "user " << mypid << " received message: " << mymsg.mpcb << endl;
+      loopAgain = false;
     }
   }
-  if (msgrcvTimeout <= 0) { cout << "user " << mypid << " msgrcv timeout." << endl; }
+  if (msgrcvTimeout <= 0 && loopAgain) { cout << "user " << mypid << " msgrcv timeout." << endl; }
 
   //cout << "user: read from PCB, mypid is " << pctable[0].local_simulated_pid << endl;
   //cout << "user: read from clock (sec): " << clocksim->seconds << endl;
@@ -79,7 +81,7 @@ int main() {
 
   //detach from existing shared memory
   if (shmdt((void *)pctable) == IPC_ERR) { perror("user shmdt PCT"); }
-  if (shmdt((void *)clocksim) == IPC_ERR) { perror("user shmdt clokc"); }
+  if (shmdt((void *)clocksim) == IPC_ERR) { perror("user shmdt clock"); }
 
   return 0;
 }

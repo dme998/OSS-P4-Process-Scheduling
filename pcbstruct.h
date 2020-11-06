@@ -13,7 +13,7 @@ struct myclock_t {
 
 struct mymsg_t {
   long mtype;
-  char mtext[80];
+  int mpcb;
 };
 
 const int MAX_PCBS = 18;
