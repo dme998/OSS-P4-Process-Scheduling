@@ -6,5 +6,10 @@
 
 oss will allocate two sections of shared memory to which user_proc will attach.
 oss "schedules" and runs 10 user process back to back using a simulated clock.
-user_proc simply prints "hello world".
+oss sends exactly one message targeted exclusively at the first user process it launched. 
+user_proc prints "hello world", its PID, and waits to receive a message up to a timeout period. 
+  If user_proc receives its message, it will print it. 
+  If it times out, it will print an error and terminate.
+  
+  Expected result is one user process will receive the message and the rest time out. 
 

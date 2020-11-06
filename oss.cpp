@@ -9,6 +9,7 @@
 //#include <stdlib.h>   //for atoi
 //#include <cstdio>     //for printf
 #include <string>       //for cpp strings
+#include <string.h>     //for strcpy
 #include <unistd.h>     //for fork & exec
 #include <sys/wait.h>   //for wait
 #include <sys/msg.h>    //for message queue
@@ -46,11 +47,14 @@ int main() {
 
   //shared memory var
   key_t shmkey, shmkey2;        //keys used in shmget
-  int shmid, shmid2;            //ids returned by shmget
+  int shmid, shmid2;            //ids returned by shmget for pct and clock, respectively
   pcb_t *pctable;               //array of structs, process table containing each PCB 
   myclock_t *clocksim;          //holds two values: sec and nanosec (shared)
-  shmkey = 99841;               //hardcoded key because ftok always returns 0 
-  shmkey2 = 99842;
+  shmkey = 99841;               //for process control table
+  shmkey2 = 99842;              //for shared clock
+  int msqid;                    //id returned by msgget
+  key_t msqkey = 99843;         //message queue key
+  mymsg_t mymsg;                //holds message type and message data
 
   //allocate shared memory - PCT
   shmid = shmget(shmkey, SHM_SIZE, PERM | IPC_CREAT | IPC_EXCL);
@@ -68,6 +72,11 @@ int main() {
   if (clocksim == (void *)IPC_ERR) { perror("shmat clock"); exit(1); }
   else writeLog("oss: attached to shared memory for simulated clock", true);
   
+  //setup the message queue
+  msqid = msgget(msqkey, PERM | IPC_CREAT | IPC_EXCL);
+  if (msqid == IPC_ERR) { perror("msgget"); exit(1); }
+  else writeLog("oss: created message queue", true);
+
   /*************************************************************************/
 
   
@@ -94,12 +103,20 @@ int main() {
   localClocksim = addTimeToClock(interval, localClocksim);
 
   //lets just put something in the pctable to test
-  pid_t mypid = fexe();
-  writeLog("oss: Generated process with PID " + to_string(mypid) + " at time " 
+  pid_t childpid = fexe();
+  writeLog("oss: Generated process with PID " + to_string(childpid) + " at time " 
            + to_string(clocksim->seconds) + ":" + to_string(clocksim->nanoseconds), true);
-  pctable[0].local_simulated_pid = mypid;
+  pctable[0].local_simulated_pid = childpid;
   pctracker.set(0);
   
+  mymsg.mtype = childpid; 
+  strcpy( mymsg.mtext, "TEST");
+  if ( msgsnd(msqid, &mymsg, strlen(mymsg.mtext) + 1, IPC_NOWAIT) == IPC_ERR ) {
+    perror("msgsnd");
+    exit(1);
+  }
+  writeLog("oss: sent exclusive test message to first user process", true);
+
   int pcbnum = 0;  //pctable[] index
   while(totalProcessesGenerated < maxProcessesToGenerate) {
     //generate processes at random intervals
@@ -110,15 +127,14 @@ int main() {
       while(!pctracker.test(i)){ i++; }  //find first available PCB using pctracker bitvector
       pcbnum = i;
       pctracker.set(i);
-      pid_t mypid = fexe();
+      pid_t childpid = fexe();
       totalProcessesGenerated++;
       localClocksim = addTimeToClock(interval, localClocksim);
       clocksim->seconds = localClocksim.seconds;
       clocksim->nanoseconds = localClocksim.nanoseconds;
-      writeLog("oss: Generated process with PID " + to_string(mypid) + " at time " 
+      writeLog("oss: Generated process with PID " + to_string(childpid) + " at time " 
                 + to_string(clocksim->seconds) + ":" + to_string(clocksim->nanoseconds), true);
-      pctable[pcbnum].local_simulated_pid = mypid;  //TODO user process will need non-0 index
-                                                    //.....pass pcbnum via execl
+      pctable[pcbnum].local_simulated_pid = childpid; 
     }
     
   }
@@ -128,10 +144,10 @@ int main() {
 
   //detach shared memory
   if (shmdt((void *)pctable) == IPC_ERR) { perror("shmdt PCT"); }
-  writeLog("oss: detached from shared memory for process control table", true);
+  else writeLog("oss: detached from shared memory for process control table", true);
   if (shmdt((void *)clocksim) == IPC_ERR) { perror("shmdt clock"); }
-  writeLog("oss: detached from shared memory for simulated clock", true);
-
+  else writeLog("oss: detached from shared memory for simulated clock", true);
+  
   //free shared memory, wait for children
   pid_t wpid;
   int status = 0;
@@ -139,10 +155,13 @@ int main() {
   cout << "oss: no more children." << endl;
 
   if (shmctl(shmid, IPC_RMID, NULL) == IPC_ERR) { perror("shmctl PCT"); }
-  writeLog("oss: freed shared memory for process control table", true);
+  else writeLog("oss: freed shared memory for process control table", true);
   if (shmctl(shmid2, IPC_RMID, NULL) == IPC_ERR) { perror("shmctl clock"); }
-  writeLog("oss: freed shared memory for simulated clock", true);
+  else writeLog("oss: freed shared memory for simulated clock", true);
 
+  //remove message queue
+  if ( msgctl(msqid, IPC_RMID, NULL) == IPC_ERR ) { perror("msgctl RMID"); }
+  else writeLog("oss: removed message queue", true);
 
   //terminate
   writeLog("oss: terminating", true);
@@ -174,15 +193,15 @@ void writeLog(const string &message, bool append) {
 
 
 int fexe() {  
-  pid_t mypid = fork();
-  if (mypid == -1) {
+  pid_t childpid = fork();
+  if (childpid == -1) {
     perror("fork failed");
   }
-  else if (mypid >= 0) {
+  else if (childpid >= 0) {
     //fork successful
     //TODO increment pr_count
   }
-  if (mypid == 0) {
+  if (childpid == 0) {
     //I am child process
     char *args[2] = { (char*)("./user_proc"), NULL};
     
@@ -191,7 +210,7 @@ int fexe() {
       exit(1);
     }
   }
-  return mypid;
+  return childpid;
 }
 
 

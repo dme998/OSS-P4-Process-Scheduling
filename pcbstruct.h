@@ -11,5 +11,10 @@ struct myclock_t {
   long nanoseconds = 0;
 };
 
+struct mymsg_t {
+  long mtype;
+  char mtext[80];
+};
+
 const int MAX_PCBS = 18;
 const int SHM_SIZE = (sizeof(pcb_t) * MAX_PCBS); 
